@@ -100,12 +100,12 @@ northbridge-databricks-pipeline/
 
 | Week | Focus | Status |
 |---|---|---|
-| 1 | Workspace, GitHub, catalog structure, README | In progress |
-| 2 | Data prep: PaySim download, customer master, ledger with defects | Not started |
-| 3 | Bronze: Auto Loader ingestion | Not started |
-| 4 | Silver: cleaning, dedupe, rejected rows, PII masking | Not started |
-| 5 | Silver: SCD2 customer dimension | Not started |
-| 6 | Gold: KPIs, fraud flags, reconciliation, customer 360 | Not started |
+| 1 | Workspace, GitHub, catalog structure, README | Completed |
+| 2 | Data prep: PaySim download, customer master, ledger with defects | Completed |
+| 3 | Bronze: Auto Loader ingestion | Completed |
+| 4 | Silver: cleaning, dedupe, rejected rows, PII masking | Completed |
+| 5 | Silver: SCD2 customer dimension | Completed |
+| 6 | Gold: KPIs, fraud flags, reconciliation, customer 360 | In progress |
 | 7 | Orchestration with Workflows, rebuild in Lakeflow Declarative Pipelines | Not started |
 | 8 | Dashboard, documentation, portfolio write-up | Not started |
 
