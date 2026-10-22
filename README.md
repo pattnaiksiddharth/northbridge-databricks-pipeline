@@ -4,7 +4,7 @@ A medallion-architecture data platform for a fictional retail bank, built on **D
 
 > **Walkthrough video:** `<add link>` (4 minutes)
 
-![Dashboard overview](docs/images/dashboard_overview.png)
+![Dashboard overview](docs/dashboard_overview.png)
 
 ---
 
@@ -106,7 +106,7 @@ v1 caught nearly all fraud but flagged a third of all transactions. Scoring each
 
 A daily Workflow (`northbridge_daily`) runs the pipeline, then the data-quality notebook. It has retries, a schedule and failure email alerts.
 
-![Workflow run](docs/images/workflow_run.png)
+![Workflow run](docs/workflow_run.png)
 
 ---
 
