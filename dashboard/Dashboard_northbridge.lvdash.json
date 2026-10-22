@@ -1,0 +1,1713 @@
+{
+  "datasets": [
+    {
+      "name": "b7c5aa8c",
+      "displayName": "Daily Transaction Metrics Overview",
+      "queryLines": [
+        "-- ds_kpi_summary (three counters: transactions, total_value, rejected_pct)\r\n",
+        "SELECT sum(txn_count) AS transactions, sum(total_amount) AS total_value,\r\n",
+        "       sum(rejected_count) AS rejected,\r\n",
+        "       round(100 * sum(rejected_count) / (sum(txn_count) + sum(rejected_count)), 3) AS rejected_pct\r\n",
+        "FROM northbridge.lakeflow.gold_daily_kpis;\r\n",
+        "\r\n",
+        "-- ds_daily_volume (stacked bar: x = txn_date, y = txn_count, color = txn_type)\r\n",
+        "SELECT date_add(DATE'2024-01-01', day - 1) AS txn_date, txn_type, txn_count, total_amount\r\n",
+        "FROM northbridge.lakeflow.gold_daily_kpis ORDER BY txn_date;\r\n",
+        "\r\n",
+        "-- ds_daily_volume (day x type grain; KPIs and type mix aggregate at query time)\r\n",
+        "SELECT date_add(DATE'2024-01-01', day - 1) AS txn_date, txn_type, txn_count, rejected_count, total_amount\r\n",
+        "FROM northbridge.lakeflow.gold_daily_kpis;"
+      ],
+      "columns": [
+        {
+          "displayName": "rejected_pct",
+          "description": "Percentage of transactions rejected: rejected / (accepted + rejected).",
+          "expression": "ROUND(100 * SUM(`rejected_count`) / (SUM(`txn_count`) + SUM(`rejected_count`)), 3)"
+        }
+      ]
+    },
+    {
+      "name": "49c41fc5",
+      "displayName": "Fraud Risk Alert Summary by Tier and Account",
+      "queryLines": [
+        "-- ds_fraud_tiers (bar: risk_tier vs alerts, with confirmed_fraud)\r\n",
+        "SELECT risk_tier, count(*) AS alerts, sum(is_fraud_label) AS confirmed_fraud,\r\n",
+        "       round(100 * sum(is_fraud_label) / count(*), 2) AS precision_pct\r\n",
+        "FROM northbridge.lakeflow.gold_fraud_flags GROUP BY risk_tier\r\n",
+        "ORDER BY CASE risk_tier WHEN 'HIGH' THEN 1 WHEN 'MEDIUM' THEN 2 ELSE 3 END;\r\n",
+        "\r\n",
+        "-- ds_alerts_by_day (stacked bar by tier)\r\n",
+        "SELECT date_add(DATE'2024-01-01', day - 1) AS txn_date, risk_tier, count(*) AS alerts\r\n",
+        "FROM northbridge.lakeflow.gold_fraud_flags GROUP BY 1, 2 ORDER BY 1;\r\n",
+        "\r\n",
+        "-- ds_top_accounts (table, 20 highest-risk customers)\r\n",
+        "SELECT customer_id, city, total_sent, flagged_txns, risk_level\r\n",
+        "FROM northbridge.lakeflow.gold_customer_360\r\n",
+        "WHERE risk_level = 'HIGH' ORDER BY total_sent DESC LIMIT 20;\r\n",
+        "\r\n",
+        "-- ds_rule_scores (table: precision, recall and lift per review queue)\r\n",
+        "WITH base AS (\r\n",
+        "  SELECT t.is_fraud_label AS y, f.risk_tier AS tier\r\n",
+        "  FROM northbridge.lakeflow.silver_transactions t\r\n",
+        "  LEFT JOIN northbridge.lakeflow.gold_fraud_flags f ON t.txn_id = f.txn_id),\r\n",
+        "tot AS (SELECT sum(y) AS fraud, count(*) AS n FROM base),\r\n",
+        "q AS (\r\n",
+        "  SELECT 'Top tier (HIGH)' AS queue, 1 AS ord,\r\n",
+        "         sum(CASE WHEN tier = 'HIGH' THEN 1 ELSE 0 END) AS flagged,\r\n",
+        "         sum(CASE WHEN tier = 'HIGH' THEN y ELSE 0 END) AS tp FROM base\r\n",
+        "  UNION ALL\r\n",
+        "  SELECT 'HIGH + MEDIUM', 2,\r\n",
+        "         sum(CASE WHEN tier IN ('HIGH','MEDIUM') THEN 1 ELSE 0 END),\r\n",
+        "         sum(CASE WHEN tier IN ('HIGH','MEDIUM') THEN y ELSE 0 END) FROM base\r\n",
+        "  UNION ALL\r\n",
+        "  SELECT 'All tiers', 3,\r\n",
+        "         sum(CASE WHEN tier IS NOT NULL THEN 1 ELSE 0 END),\r\n",
+        "         sum(CASE WHEN tier IS NOT NULL THEN y ELSE 0 END) FROM base)\r\n",
+        "SELECT queue, flagged, tp, flagged - tp AS fp,\r\n",
+        "       round(100 * tp / flagged, 2) AS precision_pct,\r\n",
+        "       round(100 * tp / fraud, 1) AS recall_pct,\r\n",
+        "       round((tp / flagged) / (fraud / n), 1) AS lift\r\n",
+        "FROM q CROSS JOIN tot ORDER BY ord;"
+      ]
+    },
+    {
+      "name": "93c24fac",
+      "displayName": "Reconciliation Insights Overview",
+      "queryLines": [
+        "-- ds_recon_status (bar by status, plus a counter for the total)\r\n",
+        "SELECT recon_status, count(*) AS records FROM northbridge.lakeflow.gold_reconciliation GROUP BY recon_status;\r\n",
+        "\r\n",
+        "-- ds_recon_trend (line or stacked bar by day and status)\r\n",
+        "SELECT date_add(DATE'2024-01-01', day - 1) AS txn_date, recon_status, count(*) AS records\r\n",
+        "FROM northbridge.lakeflow.gold_reconciliation GROUP BY 1, 2 ORDER BY 1;\r\n",
+        "\r\n",
+        "-- ds_recon_detail (table: the 50 largest amount mismatches)\r\n",
+        "SELECT txn_id, date_add(DATE'2024-01-01', day - 1) AS txn_date,\r\n",
+        "       gateway_amount, ledger_amount, amount_diff\r\n",
+        "FROM northbridge.lakeflow.gold_reconciliation\r\n",
+        "WHERE recon_status = 'AMOUNT_MISMATCH' ORDER BY abs(amount_diff) DESC LIMIT 50;"
+      ]
+    },
+    {
+      "name": "3b03593f",
+      "displayName": "Transaction Funnel Insights and Quality Check Summary",
+      "queryLines": [
+        "-- ds_pipeline_funnel (bar: bronze, silver, rejected row counts)\r\n",
+        "SELECT 'Bronze' AS stage, count(*) AS row_count FROM northbridge.lakeflow.bronze_transactions\r\n",
+        "UNION ALL SELECT 'Silver (clean)', count(*) FROM northbridge.lakeflow.silver_transactions\r\n",
+        "UNION ALL SELECT 'Rejected', count(*) FROM northbridge.lakeflow.silver_transactions_rejected;\r\n",
+        "\r\n",
+        "-- ds_rejected_by_reason (bar)\r\n",
+        "SELECT reject_reason, count(*) AS records\r\n",
+        "FROM northbridge.lakeflow.silver_transactions_rejected GROUP BY reject_reason ORDER BY records DESC;\r\n",
+        "\r\n",
+        "-- ds_dq_latest (table: latest result of each check)\r\n",
+        "SELECT check_name, status, row_count, run_ts\r\n",
+        "FROM northbridge.ops.dq_results\r\n",
+        "WHERE check_name LIKE 'lf_%'\r\n",
+        "  AND run_ts = (SELECT max(d2.run_ts) FROM northbridge.ops.dq_results d2 WHERE d2.check_name = dq_results.check_name)\r\n",
+        "ORDER BY check_name;"
+      ]
+    },
+    {
+      "name": "fraud_alerts_by_tier",
+      "displayName": "Fraud Alerts by Tier",
+      "config": {
+        "version": "1.1",
+        "source": "SELECT day, risk_tier, is_fraud_label FROM northbridge.lakeflow.gold_fraud_flags\n",
+        "dimensions": [
+          {
+            "expr": "risk_tier",
+            "comment": "Fraud risk tier assigned to the transaction (HIGH, MEDIUM, LOW)"
+          },
+          {
+            "name": "txn_date",
+            "expr": "date_add(DATE'2024-01-01', `day` - 1)",
+            "comment": "Transaction date"
+          }
+        ],
+        "measures": [
+          {
+            "name": "alerts",
+            "expr": "COUNT(*)",
+            "comment": "Number of flagged transactions"
+          },
+          {
+            "name": "confirmed_fraud",
+            "expr": "SUM(`is_fraud_label`)",
+            "comment": "Flagged transactions confirmed as real fraud"
+          }
+        ]
+      }
+    },
+    {
+      "name": "top_risk_accounts",
+      "displayName": "Top Risk Accounts",
+      "config": {
+        "version": "1.1",
+        "source": "SELECT customer_id, city, total_sent, flagged_txns, risk_level FROM northbridge.lakeflow.gold_customer_360 WHERE risk_level = 'HIGH' ORDER BY total_sent DESC LIMIT 20\n",
+        "dimensions": [
+          {
+            "expr": "customer_id",
+            "comment": "Customer identifier"
+          },
+          {
+            "expr": "city",
+            "comment": "Customer's home city"
+          },
+          {
+            "expr": "total_sent",
+            "comment": "Total amount sent by the customer"
+          },
+          {
+            "expr": "flagged_txns",
+            "comment": "Number of flagged transactions"
+          },
+          {
+            "expr": "risk_level",
+            "comment": "Customer risk level"
+          }
+        ]
+      }
+    },
+    {
+      "name": "recon_exceptions",
+      "displayName": "Reconciliation Exceptions",
+      "config": {
+        "version": "1.1",
+        "source": "SELECT day, recon_status FROM northbridge.lakeflow.gold_reconciliation\n",
+        "dimensions": [
+          {
+            "expr": "recon_status",
+            "comment": "Reconciliation outcome for the transaction"
+          },
+          {
+            "name": "txn_date",
+            "expr": "date_add(DATE'2024-01-01', `day` - 1)",
+            "comment": "Transaction date"
+          }
+        ],
+        "measures": [
+          {
+            "name": "records",
+            "expr": "COUNT(*)",
+            "comment": "Number of reconciliation records"
+          }
+        ]
+      }
+    },
+    {
+      "name": "pipeline_funnel",
+      "displayName": "Pipeline Funnel",
+      "config": {
+        "version": "1.1",
+        "source": "SELECT 'Bronze' AS stage, count(*) AS row_count FROM northbridge.lakeflow.bronze_transactions\nUNION ALL SELECT 'Silver (clean)' AS stage, count(*) FROM northbridge.lakeflow.silver_transactions\nUNION ALL SELECT 'Rejected' AS stage, count(*) FROM northbridge.lakeflow.silver_transactions_rejected\n",
+        "dimensions": [
+          {
+            "expr": "stage",
+            "comment": "Pipeline stage"
+          }
+        ],
+        "measures": [
+          {
+            "name": "row_count",
+            "expr": "SUM(`row_count`)",
+            "comment": "Number of rows at the stage"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rejected_by_reason",
+      "displayName": "Rejected by Reason",
+      "config": {
+        "version": "1.1",
+        "source": "SELECT reject_reason FROM northbridge.lakeflow.silver_transactions_rejected\n",
+        "dimensions": [
+          {
+            "expr": "reject_reason",
+            "comment": "Rule that caused the row to be rejected"
+          }
+        ],
+        "measures": [
+          {
+            "name": "records",
+            "expr": "COUNT(*)",
+            "comment": "Number of rejected rows"
+          }
+        ]
+      }
+    }
+  ],
+  "relationshipGraphs": [
+    {
+      "sources": [
+        {
+          "name": "Daily_Transaction_Metrics_Overview",
+          "datasetName": "b7c5aa8c"
+        },
+        {
+          "name": "Fraud_Risk_Alert_Summary_by_Tier_and_Account",
+          "datasetName": "49c41fc5"
+        },
+        {
+          "name": "Reconciliation_Insights_Overview",
+          "datasetName": "93c24fac"
+        },
+        {
+          "name": "Transaction_Funnel_Insights_and_Quality_Check_Summary",
+          "datasetName": "3b03593f"
+        },
+        {
+          "name": "Fraud_Alerts_by_Tier",
+          "datasetName": "fraud_alerts_by_tier"
+        },
+        {
+          "name": "Top_Risk_Accounts",
+          "datasetName": "top_risk_accounts"
+        },
+        {
+          "name": "Reconciliation_Exceptions",
+          "datasetName": "recon_exceptions"
+        },
+        {
+          "name": "Pipeline_Funnel",
+          "datasetName": "pipeline_funnel"
+        },
+        {
+          "name": "Rejected_by_Reason",
+          "datasetName": "rejected_by_reason"
+        }
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "c666f5c1",
+      "displayName": "Executive overview",
+      "layout": [
+        {
+          "widget": {
+            "name": "2b383d42",
+            "multilineTextboxSpec": {
+              "lines": [
+                "<span style=\"text-align:center;display:block;\"><span style=\"font-size:36px;line-height:1.5;font-family:Times New Roman\">**NorthBridge Bank: daily operations**</span></span>"
+              ],
+              "verticalAlign": "VERTICAL_ALIGN_CENTER"
+            },
+            "specExtensions": {
+              "widgetBorderColor": {
+                "dark": "#2188DE"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "301512d2",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "fields": [
+                    {
+                      "name": "sum(Daily_Transaction_Metrics_Overview__txn_count)",
+                      "expression": "SUM(`Daily_Transaction_Metrics_Overview`.`txn_count`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": {
+                  "value": "Total transactions",
+                  "fields": []
+                }
+              },
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(Daily_Transaction_Metrics_Overview__txn_count)"
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            },
+            "specExtensions": {
+              "widgetBorderColor": {
+                "dark": "#2188DE"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "961bd110",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "fields": [
+                    {
+                      "name": "sum(Daily_Transaction_Metrics_Overview__total_amount)",
+                      "expression": "SUM(`Daily_Transaction_Metrics_Overview`.`total_amount`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": {
+                  "value": "Total value",
+                  "fields": []
+                }
+              },
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(Daily_Transaction_Metrics_Overview__total_amount)",
+                  "format": {
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "places": 1,
+                      "type": "max"
+                    },
+                    "type": "number-plain"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            },
+            "specExtensions": {
+              "widgetBorderColor": {
+                "dark": "#2188DE"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "9c50ae22",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "fields": [
+                    {
+                      "name": "measure(Daily_Transaction_Metrics_Overview__rejected_pct)",
+                      "expression": "MEASURE(`Daily_Transaction_Metrics_Overview`.`rejected_pct`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": {
+                  "value": "Rejected rate (%)",
+                  "fields": []
+                }
+              },
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(Daily_Transaction_Metrics_Overview__rejected_pct)",
+                  "format": {
+                    "type": "number-percent",
+                    "decimalPlaces": {
+                      "type": "max",
+                      "places": 2
+                    }
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            },
+            "specExtensions": {
+              "widgetBorderColor": {
+                "dark": "#2188DE"
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 2,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "acb5fc98",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "fields": [
+                    {
+                      "name": "Daily_Transaction_Metrics_Overview__txn_type",
+                      "expression": "`Daily_Transaction_Metrics_Overview`.`txn_type`"
+                    },
+                    {
+                      "name": "Daily_Transaction_Metrics_Overview__txn_date",
+                      "expression": "`Daily_Transaction_Metrics_Overview`.`txn_date`"
+                    },
+                    {
+                      "name": "sum(Daily_Transaction_Metrics_Overview__txn_count)",
+                      "expression": "SUM(`Daily_Transaction_Metrics_Overview`.`txn_count`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": {
+                  "value": "Daily volume by type",
+                  "fields": []
+                }
+              },
+              "version": 3,
+              "mark": {
+                "layout": "stack"
+              },
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "Daily_Transaction_Metrics_Overview__txn_date",
+                  "scale": {
+                    "categorySize": {
+                      "number": 31,
+                      "type": "number-of-categories"
+                    },
+                    "type": "categorical"
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(Daily_Transaction_Metrics_Overview__txn_count)",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "Daily_Transaction_Metrics_Overview__txn_type",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            },
+            "specExtensions": {
+              "widgetBorderColor": {
+                "dark": "#2188DE"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 4,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "a9d9bbfb",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "fields": [
+                    {
+                      "name": "Daily_Transaction_Metrics_Overview__txn_date",
+                      "expression": "`Daily_Transaction_Metrics_Overview`.`txn_date`"
+                    },
+                    {
+                      "name": "sum(Daily_Transaction_Metrics_Overview__total_amount)",
+                      "expression": "SUM(`Daily_Transaction_Metrics_Overview`.`total_amount`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": {
+                  "value": "Daily value",
+                  "fields": []
+                }
+              },
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "Daily_Transaction_Metrics_Overview__txn_date",
+                  "axis": {
+                    "hideTitle": false
+                  },
+                  "scale": {
+                    "categorySize": {
+                      "number": 31,
+                      "type": "number-of-categories"
+                    },
+                    "type": "categorical"
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(Daily_Transaction_Metrics_Overview__total_amount)",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            },
+            "specExtensions": {
+              "widgetBorderColor": {
+                "dark": "#2188DE"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 4,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "ff00d44c",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "fields": [
+                    {
+                      "name": "sum(Daily_Transaction_Metrics_Overview__total_amount)",
+                      "expression": "SUM(`Daily_Transaction_Metrics_Overview`.`total_amount`)"
+                    },
+                    {
+                      "name": "Daily_Transaction_Metrics_Overview__txn_type",
+                      "expression": "`Daily_Transaction_Metrics_Overview`.`txn_type`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": {
+                  "value": "Value by type",
+                  "fields": []
+                }
+              },
+              "version": 3,
+              "widgetType": "pie",
+              "encodings": {
+                "angle": {
+                  "fieldName": "sum(Daily_Transaction_Metrics_Overview__total_amount)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "hideTitle": false
+                  }
+                },
+                "color": {
+                  "fieldName": "Daily_Transaction_Metrics_Overview__txn_type",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "natural-order"
+                    }
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            },
+            "specExtensions": {
+              "widgetBorderColor": {
+                "dark": "#2188DE"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 10,
+            "width": 6,
+            "height": 6
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1"
+    },
+    {
+      "name": "fddca2aa",
+      "displayName": "Fraud Monitoring",
+      "layout": [
+        {
+          "widget": {
+            "name": "7e3f1e4e",
+            "multilineTextboxSpec": {
+              "lines": [
+                "<span style=\"text-align:center;display:block;\"><span style=\"font-size: 18px;font-family: Times New Roman;\">**Base fraud rate: 0.129%. Alerts are tiered HIGH, MEDIUM and LOW. Precision is the share of alerts that were real fraud.**</span></span>"
+              ],
+              "verticalAlign": "VERTICAL_ALIGN_CENTER"
+            },
+            "specExtensions": {
+              "widgetBorderColor": {
+                "dark": "#2188DE"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "1a6085f9",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "fields": [
+                    {
+                      "name": "Fraud_Alerts_by_Tier__risk_tier",
+                      "expression": "`Fraud_Alerts_by_Tier`.`risk_tier`"
+                    },
+                    {
+                      "name": "measure(Fraud_Alerts_by_Tier__alerts)",
+                      "expression": "MEASURE(`Fraud_Alerts_by_Tier`.`alerts`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": {
+                  "value": "Alerts by tier",
+                  "fields": []
+                }
+              },
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "Fraud_Alerts_by_Tier__risk_tier",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "custom-order",
+                      "orderedValues": [
+                        "HIGH",
+                        "MEDIUM",
+                        "LOW"
+                      ]
+                    }
+                  }
+                },
+                "y": {
+                  "fieldName": "measure(Fraud_Alerts_by_Tier__alerts)",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            },
+            "specExtensions": {
+              "widgetBorderColor": {
+                "dark": "#2188DE"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 12,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "8234573b",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "fields": [
+                    {
+                      "name": "Fraud_Risk_Alert_Summary_by_Tier_and_Account__queue",
+                      "expression": "`Fraud_Risk_Alert_Summary_by_Tier_and_Account`.`queue`"
+                    },
+                    {
+                      "name": "Fraud_Risk_Alert_Summary_by_Tier_and_Account__flagged",
+                      "expression": "`Fraud_Risk_Alert_Summary_by_Tier_and_Account`.`flagged`"
+                    },
+                    {
+                      "name": "Fraud_Risk_Alert_Summary_by_Tier_and_Account__tp",
+                      "expression": "`Fraud_Risk_Alert_Summary_by_Tier_and_Account`.`tp`"
+                    },
+                    {
+                      "name": "Fraud_Risk_Alert_Summary_by_Tier_and_Account__fp",
+                      "expression": "`Fraud_Risk_Alert_Summary_by_Tier_and_Account`.`fp`"
+                    },
+                    {
+                      "name": "Fraud_Risk_Alert_Summary_by_Tier_and_Account__precision_pct",
+                      "expression": "`Fraud_Risk_Alert_Summary_by_Tier_and_Account`.`precision_pct`"
+                    },
+                    {
+                      "name": "Fraud_Risk_Alert_Summary_by_Tier_and_Account__recall_pct",
+                      "expression": "`Fraud_Risk_Alert_Summary_by_Tier_and_Account`.`recall_pct`"
+                    },
+                    {
+                      "name": "Fraud_Risk_Alert_Summary_by_Tier_and_Account__lift",
+                      "expression": "`Fraud_Risk_Alert_Summary_by_Tier_and_Account`.`lift`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": {
+                  "value": "Review queue performance",
+                  "fields": []
+                }
+              },
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "Fraud_Risk_Alert_Summary_by_Tier_and_Account__queue"
+                  },
+                  {
+                    "fieldName": "Fraud_Risk_Alert_Summary_by_Tier_and_Account__flagged"
+                  },
+                  {
+                    "fieldName": "Fraud_Risk_Alert_Summary_by_Tier_and_Account__tp"
+                  },
+                  {
+                    "fieldName": "Fraud_Risk_Alert_Summary_by_Tier_and_Account__fp"
+                  },
+                  {
+                    "fieldName": "Fraud_Risk_Alert_Summary_by_Tier_and_Account__precision_pct"
+                  },
+                  {
+                    "fieldName": "Fraud_Risk_Alert_Summary_by_Tier_and_Account__recall_pct"
+                  },
+                  {
+                    "fieldName": "Fraud_Risk_Alert_Summary_by_Tier_and_Account__lift"
+                  }
+                ]
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            },
+            "specExtensions": {
+              "widgetBorderColor": {
+                "dark": "#2188DE"
+              }
+            }
+          },
+          "position": {
+            "x": 1,
+            "y": 2,
+            "width": 10,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "2c79c378",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "fields": [
+                    {
+                      "name": "Fraud_Alerts_by_Tier__risk_tier",
+                      "expression": "`Fraud_Alerts_by_Tier`.`risk_tier`"
+                    },
+                    {
+                      "name": "Fraud_Alerts_by_Tier__txn_date",
+                      "expression": "`Fraud_Alerts_by_Tier`.`txn_date`"
+                    },
+                    {
+                      "name": "measure(Fraud_Alerts_by_Tier__alerts)",
+                      "expression": "MEASURE(`Fraud_Alerts_by_Tier`.`alerts`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": {
+                  "value": "Alerts per day",
+                  "fields": []
+                }
+              },
+              "version": 3,
+              "mark": {
+                "layout": "stack"
+              },
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "Fraud_Alerts_by_Tier__txn_date",
+                  "scale": {
+                    "categorySize": {
+                      "number": 31,
+                      "type": "number-of-categories"
+                    },
+                    "type": "categorical"
+                  }
+                },
+                "y": {
+                  "fieldName": "measure(Fraud_Alerts_by_Tier__alerts)",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "Fraud_Alerts_by_Tier__risk_tier",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            },
+            "specExtensions": {
+              "widgetBorderColor": {
+                "dark": "#2188DE"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 6,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "f9ddbf87",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "fields": [
+                    {
+                      "name": "Top_Risk_Accounts__customer_id",
+                      "expression": "`Top_Risk_Accounts`.`customer_id`"
+                    },
+                    {
+                      "name": "Top_Risk_Accounts__city",
+                      "expression": "`Top_Risk_Accounts`.`city`"
+                    },
+                    {
+                      "name": "Top_Risk_Accounts__total_sent",
+                      "expression": "`Top_Risk_Accounts`.`total_sent`"
+                    },
+                    {
+                      "name": "Top_Risk_Accounts__flagged_txns",
+                      "expression": "`Top_Risk_Accounts`.`flagged_txns`"
+                    },
+                    {
+                      "name": "Top_Risk_Accounts__risk_level",
+                      "expression": "`Top_Risk_Accounts`.`risk_level`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": {
+                  "value": "Highest-risk accounts",
+                  "fields": []
+                }
+              },
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "Top_Risk_Accounts__customer_id"
+                  },
+                  {
+                    "fieldName": "Top_Risk_Accounts__city"
+                  },
+                  {
+                    "fieldName": "Top_Risk_Accounts__total_sent"
+                  },
+                  {
+                    "fieldName": "Top_Risk_Accounts__flagged_txns"
+                  },
+                  {
+                    "fieldName": "Top_Risk_Accounts__risk_level"
+                  }
+                ]
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            },
+            "specExtensions": {
+              "widgetBorderColor": {
+                "dark": "#2188DE"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 6,
+            "width": 6,
+            "height": 6
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1"
+    },
+    {
+      "name": "035439d1",
+      "displayName": "Global Filters",
+      "layout": [
+        {
+          "widget": {
+            "name": "transaction-type",
+            "queries": [
+              {
+                "name": "dashboards/01f1cd9f708f12f3a02b20e1f42a2c07/datasets/01f1cd9fbecf1606a6d5539a120fba5e_txn_type",
+                "query": {
+                  "datasetName": "b7c5aa8c",
+                  "fields": [
+                    {
+                      "name": "txn_type",
+                      "expression": "`txn_type`"
+                    },
+                    {
+                      "name": "txn_type_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "title": {
+                  "value": "Transaction Type\n<p>&nbsp;</p>\n",
+                  "fields": []
+                }
+              },
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "txn_type",
+                    "queryName": "dashboards/01f1cd9f708f12f3a02b20e1f42a2c07/datasets/01f1cd9fbecf1606a6d5539a120fba5e_txn_type"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 1,
+            "height": 2
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_GLOBAL_FILTERS",
+      "layoutVersion": "GRID_V1"
+    },
+    {
+      "name": "14c9f486",
+      "displayName": "Reconciliation",
+      "layout": [
+        {
+          "widget": {
+            "name": "de149b4a",
+            "multilineTextboxSpec": {
+              "lines": [
+                "<span style=\"text-align:center;display:block;\"><span style=\"font-family: Times New Roman;font-size: 24px;\">**“Gateway vs ledger: missing and mismatched transactions”**</span></span>"
+              ],
+              "verticalAlign": "VERTICAL_ALIGN_CENTER"
+            },
+            "specExtensions": {
+              "widgetBorderColor": {
+                "dark": "#2188DE"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "50f44161",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "fields": [
+                    {
+                      "name": "measure(Reconciliation_Exceptions__records)",
+                      "expression": "MEASURE(`Reconciliation_Exceptions`.`records`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": {
+                  "value": "Total exceptions",
+                  "fields": []
+                }
+              },
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(Reconciliation_Exceptions__records)",
+                  "format": {
+                    "abbreviation": "compact",
+                    "decimalPlaces": {
+                      "places": 1,
+                      "type": "max"
+                    },
+                    "type": "number-plain"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            },
+            "specExtensions": {
+              "widgetBorderColor": {
+                "dark": "#2188DE"
+              }
+            }
+          },
+          "position": {
+            "x": 1,
+            "y": 1,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "3c5aaae4",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "fields": [
+                    {
+                      "name": "Reconciliation_Exceptions__recon_status",
+                      "expression": "`Reconciliation_Exceptions`.`recon_status`"
+                    },
+                    {
+                      "name": "measure(Reconciliation_Exceptions__records)",
+                      "expression": "MEASURE(`Reconciliation_Exceptions`.`records`)"
+                    }
+                  ],
+                  "disaggregated": false,
+                  "orders": [
+                    {
+                      "direction": "DESC",
+                      "expression": "MEASURE(`Reconciliation_Exceptions`.`records`)"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": {
+                  "value": "Exceptions by status",
+                  "fields": []
+                }
+              },
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "Reconciliation_Exceptions__recon_status",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "measure-reversed",
+                      "measure": {
+                        "fieldName": "measure(Reconciliation_Exceptions__records)"
+                      }
+                    }
+                  }
+                },
+                "y": {
+                  "fieldName": "measure(Reconciliation_Exceptions__records)",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            },
+            "specExtensions": {
+              "widgetBorderColor": {
+                "dark": "#2188DE"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 3,
+            "width": 5,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "6cdb1813",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "fields": [
+                    {
+                      "name": "Reconciliation_Exceptions__recon_status",
+                      "expression": "`Reconciliation_Exceptions`.`recon_status`"
+                    },
+                    {
+                      "name": "Reconciliation_Exceptions__txn_date",
+                      "expression": "`Reconciliation_Exceptions`.`txn_date`"
+                    },
+                    {
+                      "name": "measure(Reconciliation_Exceptions__records)",
+                      "expression": "MEASURE(`Reconciliation_Exceptions`.`records`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": {
+                  "value": "Exceptions per day",
+                  "fields": []
+                }
+              },
+              "version": 3,
+              "mark": {
+                "layout": "stack"
+              },
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "Reconciliation_Exceptions__txn_date",
+                  "scale": {
+                    "categorySize": {
+                      "number": 31,
+                      "type": "number-of-categories"
+                    },
+                    "type": "categorical"
+                  }
+                },
+                "y": {
+                  "fieldName": "measure(Reconciliation_Exceptions__records)",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "Reconciliation_Exceptions__recon_status",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            },
+            "specExtensions": {
+              "widgetBorderColor": {
+                "dark": "#2188DE"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 9,
+            "width": 8,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "68e70935",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "fields": [
+                    {
+                      "name": "Reconciliation_Insights_Overview__txn_id",
+                      "expression": "`Reconciliation_Insights_Overview`.`txn_id`"
+                    },
+                    {
+                      "name": "Reconciliation_Insights_Overview__txn_date",
+                      "expression": "`Reconciliation_Insights_Overview`.`txn_date`"
+                    },
+                    {
+                      "name": "Reconciliation_Insights_Overview__gateway_amount",
+                      "expression": "`Reconciliation_Insights_Overview`.`gateway_amount`"
+                    },
+                    {
+                      "name": "Reconciliation_Insights_Overview__ledger_amount",
+                      "expression": "`Reconciliation_Insights_Overview`.`ledger_amount`"
+                    },
+                    {
+                      "name": "Reconciliation_Insights_Overview__amount_diff",
+                      "expression": "`Reconciliation_Insights_Overview`.`amount_diff`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": {
+                  "value": "50 largest amount mismatches",
+                  "fields": []
+                }
+              },
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "Reconciliation_Insights_Overview__txn_id"
+                  },
+                  {
+                    "fieldName": "Reconciliation_Insights_Overview__txn_date"
+                  },
+                  {
+                    "fieldName": "Reconciliation_Insights_Overview__gateway_amount"
+                  },
+                  {
+                    "fieldName": "Reconciliation_Insights_Overview__ledger_amount"
+                  },
+                  {
+                    "fieldName": "Reconciliation_Insights_Overview__amount_diff"
+                  }
+                ]
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            },
+            "specExtensions": {
+              "widgetBorderColor": {
+                "dark": "#2188DE"
+              }
+            }
+          },
+          "position": {
+            "x": 5,
+            "y": 1,
+            "width": 7,
+            "height": 8
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1"
+    },
+    {
+      "name": "fbde830b",
+      "displayName": "Data Quality",
+      "layout": [
+        {
+          "widget": {
+            "name": "be93b838",
+            "multilineTextboxSpec": {
+              "lines": [
+                "<span style=\"text-align:center;display:block;\"><span style=\"font-size: 24px;font-family: Times New Roman;\">**&#9;“Every Bronze row is either clean in Silver or kept in quarantine with a reason”**</span></span>"
+              ],
+              "verticalAlign": "VERTICAL_ALIGN_CENTER"
+            },
+            "specExtensions": {
+              "widgetBorderColor": {
+                "dark": "#2188DE"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "659d55b9",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "fields": [
+                    {
+                      "name": "Pipeline_Funnel__stage",
+                      "expression": "`Pipeline_Funnel`.`stage`"
+                    },
+                    {
+                      "name": "measure(Pipeline_Funnel__row_count)",
+                      "expression": "MEASURE(`Pipeline_Funnel`.`row_count`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": {
+                  "value": "Bronze to Silver",
+                  "fields": []
+                }
+              },
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "Pipeline_Funnel__stage",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "custom-order",
+                      "orderedValues": [
+                        "Bronze",
+                        "Silver (clean)",
+                        "Rejected"
+                      ]
+                    }
+                  }
+                },
+                "y": {
+                  "fieldName": "measure(Pipeline_Funnel__row_count)",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            },
+            "specExtensions": {
+              "widgetBorderColor": {
+                "dark": "#2188DE"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "ff39649f",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "fields": [
+                    {
+                      "name": "Rejected_by_Reason__reject_reason",
+                      "expression": "`Rejected_by_Reason`.`reject_reason`"
+                    },
+                    {
+                      "name": "measure(Rejected_by_Reason__records)",
+                      "expression": "MEASURE(`Rejected_by_Reason`.`records`)"
+                    }
+                  ],
+                  "disaggregated": false,
+                  "orders": [
+                    {
+                      "direction": "DESC",
+                      "expression": "MEASURE(`Rejected_by_Reason`.`records`)"
+                    }
+                  ]
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": {
+                  "value": "Rejected rows by rule",
+                  "fields": []
+                }
+              },
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "Rejected_by_Reason__reject_reason",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "measure-reversed",
+                      "measure": {
+                        "fieldName": "measure(Rejected_by_Reason__records)"
+                      }
+                    }
+                  }
+                },
+                "y": {
+                  "fieldName": "measure(Rejected_by_Reason__records)",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            },
+            "specExtensions": {
+              "widgetBorderColor": {
+                "dark": "#2188DE"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 2,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "817b4d56",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "fields": [
+                    {
+                      "name": "Transaction_Funnel_Insights_and_Quality_Check_Summary__check_name",
+                      "expression": "`Transaction_Funnel_Insights_and_Quality_Check_Summary`.`check_name`"
+                    },
+                    {
+                      "name": "Transaction_Funnel_Insights_and_Quality_Check_Summary__status",
+                      "expression": "`Transaction_Funnel_Insights_and_Quality_Check_Summary`.`status`"
+                    },
+                    {
+                      "name": "Transaction_Funnel_Insights_and_Quality_Check_Summary__row_count",
+                      "expression": "`Transaction_Funnel_Insights_and_Quality_Check_Summary`.`row_count`"
+                    },
+                    {
+                      "name": "Transaction_Funnel_Insights_and_Quality_Check_Summary__run_ts",
+                      "expression": "`Transaction_Funnel_Insights_and_Quality_Check_Summary`.`run_ts`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": {
+                  "value": "Latest quality checks",
+                  "fields": []
+                }
+              },
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "Transaction_Funnel_Insights_and_Quality_Check_Summary__check_name"
+                  },
+                  {
+                    "fieldName": "Transaction_Funnel_Insights_and_Quality_Check_Summary__status"
+                  },
+                  {
+                    "fieldName": "Transaction_Funnel_Insights_and_Quality_Check_Summary__row_count"
+                  },
+                  {
+                    "fieldName": "Transaction_Funnel_Insights_and_Quality_Check_Summary__run_ts"
+                  }
+                ]
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            },
+            "specExtensions": {
+              "widgetBorderColor": {
+                "dark": "#2188DE"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 8,
+            "width": 12,
+            "height": 5
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1"
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "canvasBackgroundColor": {
+        "light": "#FAFAFB",
+        "dark": "#1F272D"
+      },
+      "widgetBackgroundColor": {
+        "light": "#FFFFFF",
+        "dark": "#11171C"
+      },
+      "fontColor": {
+        "light": "#11171C",
+        "dark": "#E8ECF0"
+      },
+      "selectionColor": {
+        "light": "#2272B4",
+        "dark": "#8ACAFF"
+      },
+      "widgetHeaderAlignment": "CENTER",
+      "textBoxVerticalAlign": "VERTICAL_ALIGN_CENTER",
+      "widgetMargin": 16,
+      "widgetCornerRadius": 8,
+      "widgetShadow": 55
+    },
+    "applyModeEnabled": false
+  }
+}
