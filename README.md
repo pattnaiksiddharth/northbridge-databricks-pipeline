@@ -2,7 +2,7 @@
 
 A medallion-architecture data platform for a fictional retail bank, built on **Databricks Free Edition** with Unity Catalog, Auto Loader, Delta Lake, Lakeflow Declarative Pipelines and Workflows. It ingests messy data from three source systems, validates and quarantines bad records, tracks customer history, flags suspicious transactions, reconciles the payment gateway against the general ledger, and serves the results to a dashboard.
 
-> **Walkthrough video:** `<add link>` (4 minutes)
+> **Walkthrough video:** `<https://www.youtube.com/watch?v=y1rMyKNMYFY&feature=youtu.be>` (7 minutes)
 
 ![Dashboard overview](docs/dashboard_overview.png)
 
